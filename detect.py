@@ -36,6 +36,15 @@ import sys
 from pathlib import Path
 
 import torch
+import pandas as pd
+import boto3
+from botocore.exceptions import NoCredentialsError
+
+session = boto3.Session(region_name='us-east-2')
+
+# Get the region
+region = session.region_name
+print(f"Current region: {region}")
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLOv5 root directory
@@ -64,8 +73,13 @@ from utils.general import (
     xyxy2xywh,
 )
 from utils.torch_utils import select_device, smart_inference_mode
-
-
+d_count = 0
+data_pt = 1
+data_id = []
+object_detected = []
+number_of_object = []
+collect_data = {'data id': data_id, 'object detected': object_detected, 'object #': number_of_object}
+id_num = 1
 @smart_inference_mode()
 def run(
     weights=ROOT / "yolov5s.pt",  # model path or triton URL
@@ -98,6 +112,13 @@ def run(
     dnn=False,  # use OpenCV DNN for ONNX inference
     vid_stride=1,  # video frame-rate stride
 ):
+    global d_count
+    global data_pt
+    global collect_data
+    global data_id
+    global object_detected
+    global number_of_object
+    global id_num
     """
     Runs YOLOv5 detection inference on various sources like images, videos, directories, streams, etc.
 
@@ -246,9 +267,22 @@ def run(
                 det[:, :4] = scale_boxes(im.shape[2:], det[:, :4], im0.shape).round()
 
                 # Print results
+                det_per_cl = []
+                det_obj = []
                 for c in det[:, 5].unique():
                     n = (det[:, 5] == c).sum()  # detections per class
                     s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
+                    det_obj += [names[int(c)]]
+                    det_per_cl += [int(n)]
+                d_count += 1
+                if d_count == 50:
+                    data_id += [id_num]
+                    object_detected += [det_obj]
+                    number_of_object += [det_per_cl]
+                    collect_data = {'data id': data_id, 'object detected': object_detected, 'object #': number_of_object}
+                    print(collect_data)
+                    d_count = 0
+                    id_num += 1
 
                 # Write results
                 for *xyxy, conf, cls in reversed(det):
@@ -319,6 +353,36 @@ def run(
     if update:
         strip_optimizer(weights[0])  # update model (to fix SourceChangeWarning)
 
+def flatten_list(lst):
+    return ','.join(map(str, lst))
+
+flattened_dict = {
+    'data id': collect_data['data id'],
+    'obj name': [flatten_list(names) for names in collect_data['object detected']],
+    'obj #': [flatten_list(numbers) for numbers in collect_data['object #']]
+}
+
+# Create a DataFrame from the flattened dictionary
+df = pd.DataFrame(flattened_dict)
+
+# Save the DataFrame to a CSV file
+df.to_csv('output.csv', index=False)
+
+def upload_to_aws(local_file, bucket, s3_file):
+    s3 = boto3.client('s3')
+
+    try:
+        # Upload the file
+        s3.upload_file(local_file, bucket, s3_file)
+        print(f"File {s3_file} uploaded successfully to {bucket}")
+    except FileNotFoundError:
+        print("The file was not found")
+    except NoCredentialsError:
+        print("Credentials not available")
+
+bucket_name = "traffixdata"  # Replace with your S3 bucket name
+s3_file_name = "intersection_data"
+upload_to_aws("output.csv", bucket_name, s3_file_name)
 
 def parse_opt():
     """
